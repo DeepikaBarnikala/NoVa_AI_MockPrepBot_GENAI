@@ -1,6 +1,6 @@
-
 import os
 import time
+import inspect
 from io import BytesIO
 
 import streamlit as st
@@ -208,7 +208,7 @@ selected_feature = st.sidebar.radio(
         "NOVA Dashboard",
         "General Chat",
         "RAG Knowledge Base",
-        "NOVA Document Studio"
+        "NOVA Document Studio",
     ],
     key="nova_feature_mode",
 )
@@ -241,17 +241,26 @@ if selected_feature == "General Chat":
 
 
 # ---------------------------------------------------------
-# 3B. RAG KNOWLEDGE BASE
+# 3B. RAG KNOWLEDGE BASE — CONTINUOUS CHAT + DATABASE
 # ---------------------------------------------------------
 
 if selected_feature == "RAG Knowledge Base":
+
     st.title("📚 NOVA RAG Knowledge Base")
 
     st.write(
         "Upload interview notes, technical PDFs, or study materials. "
         "NOVA will search your documents and answer your questions "
-        "using relevant information."
+        "using relevant information. You can ask follow-up questions "
+        "and reopen conversations saved in the database."
     )
+
+    # Separate RAG chat state from mock interview messages.
+    if "rag_messages" not in st.session_state:
+        st.session_state.rag_messages = []
+
+    if "rag_conversation_id" not in st.session_state:
+        st.session_state.rag_conversation_id = None
 
     try:
         rag_client = get_gemini_client()
@@ -263,7 +272,10 @@ if selected_feature == "RAG Knowledge Base":
 
         st.divider()
 
+        # -------------------------------------------------
         # PDF UPLOAD
+        # -------------------------------------------------
+
         st.subheader("📄 Upload a PDF")
 
         uploaded_pdf = st.file_uploader(
@@ -295,28 +307,121 @@ if selected_feature == "RAG Knowledge Base":
                 st.caption(f"Technical details: {error}")
 
         st.caption(
-            "The first upload may take some time while Gemini "
-            "generates embeddings."
+            "Uploaded knowledge is kept in your existing ChromaDB store."
         )
 
         st.divider()
 
-        # QUESTION AND ANSWER
-        st.subheader("💬 Ask Your Documents")
+        # -------------------------------------------------
+        # SAVED RAG CONVERSATIONS
+        # -------------------------------------------------
 
-        with st.form("rag_question_form"):
-            rag_question = st.text_input(
-                "Enter your question",
-                placeholder=(
-                    "Example: Explain Python OOP concepts "
-                    "from my uploaded notes"
-                ),
+        st.subheader("💬 Your RAG Conversations")
+
+        col_new, col_clear = st.columns(2)
+
+        with col_new:
+            if st.button(
+                "➕ New RAG Chat",
+                key="new_rag_chat",
+                use_container_width=True,
+            ):
+                st.session_state.rag_messages = []
+                st.session_state.rag_conversation_id = None
+                st.rerun()
+
+        with col_clear:
+            if st.button(
+                "🧹 Clear Current Screen",
+                key="clear_rag_screen",
+                use_container_width=True,
+            ):
+                # This clears the current screen only.
+                # It does not delete saved database records.
+                st.session_state.rag_messages = []
+                st.session_state.rag_conversation_id = None
+                st.rerun()
+
+        saved_rag_conversations = [
+            item
+            for item in history.list_conversations()
+            if item.get("chat_type") == "rag"
+        ]
+
+        if saved_rag_conversations:
+
+            options = {
+                (
+                    f"{item['title']} · "
+                    f"{item['updated_at']}"
+                ): item["id"]
+                for item in saved_rag_conversations
+            }
+
+            selected_saved_rag = st.selectbox(
+                "Load a previous RAG conversation",
+                options=list(options.keys()),
+                key="saved_rag_conversation_select",
             )
 
-            ask_button = st.form_submit_button("Ask NOVA")
+            if st.button(
+                "📂 Load Selected Conversation",
+                key="load_rag_chat",
+            ):
+                selected_id = options[selected_saved_rag]
 
-        if ask_button:
-            if not rag_question.strip():
+                st.session_state.rag_conversation_id = selected_id
+
+                st.session_state.rag_messages = [
+                    {
+                        "role": message["role"],
+                        "content": message["content"],
+                    }
+                    for message in history.get_messages(selected_id)
+                    if message.get("role") in ("user", "assistant")
+                ]
+
+                st.rerun()
+
+        else:
+            st.caption(
+                "Your saved RAG conversations will appear here "
+                "after you ask your first question."
+            )
+
+        if st.session_state.rag_conversation_id is not None:
+
+            active_rag = history.get_conversation(
+                st.session_state.rag_conversation_id
+            )
+
+            if active_rag:
+                st.caption(
+                    f"Active conversation: {active_rag['title']}"
+                )
+
+        st.divider()
+
+        # -------------------------------------------------
+        # DISPLAY THE ENTIRE ACTIVE CONVERSATION
+        # -------------------------------------------------
+
+        st.subheader("💬 Ask Your Documents")
+
+        for rag_message in st.session_state.rag_messages:
+            with st.chat_message(rag_message["role"]):
+                st.markdown(rag_message["content"])
+
+        rag_question = st.chat_input(
+            "Ask a question or follow-up about your documents...",
+            key="rag_chat_input",
+        )
+
+        if rag_question:
+
+            rag_question = rag_question.strip()
+
+            if not rag_question:
                 st.warning("Please enter a question.")
 
             elif collection.count() == 0:
@@ -326,21 +431,158 @@ if selected_feature == "RAG Knowledge Base":
 
             else:
                 try:
-                    with st.spinner(
-                        "Searching your documents and preparing an answer..."
-                    ):
-                        rag_answer = ask_knowledge_base(
-                            client=rag_client,
-                            question=rag_question,
-                            generate_with_retry=generate_with_retry,
+                    # Create a new database conversation only when
+                    # the user starts a new RAG chat.
+                    if st.session_state.rag_conversation_id is None:
+
+                        title = " ".join(rag_question.split())[:60]
+
+                        if len(rag_question) > 60:
+                            title += "..."
+
+                        st.session_state.rag_conversation_id = (
+                            history.create_conversation(
+                                title=title or "RAG Chat",
+                                chat_type="rag",
+                                metadata={
+                                    "feature": "RAG Knowledge Base"
+                                },
+                            )
                         )
 
-                    st.markdown("### 🧠 NOVA's Answer")
-                    st.markdown(rag_answer)
+                    conversation_id = (
+                        st.session_state.rag_conversation_id
+                    )
+
+                    user_message = {
+                        "role": "user",
+                        "content": rag_question,
+                    }
+
+                    # Save the user's question in session and SQLite.
+                    st.session_state.rag_messages.append(user_message)
+
+                    history.add_message(
+                        conversation_id,
+                        "user",
+                        rag_question,
+                    )
+
+                    with st.chat_message("user"):
+                        st.markdown(rag_question)
+
+                    with st.chat_message("assistant"):
+
+                        with st.spinner(
+                            "Searching your documents and preparing an answer..."
+                        ):
+
+                            # Keep recent conversation turns so that
+                            # follow-ups such as "explain that more"
+                            # have context.
+                            recent_history = (
+                                st.session_state.rag_messages[-12:]
+                            )
+
+                            # Check whether the installed RAG function
+                            # supports a conversation_history parameter.
+                            rag_function_parameters = inspect.signature(
+                                ask_knowledge_base
+                            ).parameters
+
+                            if (
+                                "conversation_history"
+                                in rag_function_parameters
+                            ):
+                                rag_answer = ask_knowledge_base(
+                                    client=rag_client,
+                                    question=rag_question,
+                                    generate_with_retry=generate_with_retry,
+                                    conversation_history=recent_history,
+                                )
+
+                            else:
+                                # Compatibility fallback for an older
+                                # rag_knowledge.py implementation.
+                                previous_turns = recent_history[:-1]
+
+                                history_text = "\n".join(
+                                    (
+                                        "User: "
+                                        if item["role"] == "user"
+                                        else "NOVA: "
+                                    ) + item["content"]
+                                    for item in previous_turns
+                                )
+
+                                contextual_question = rag_question
+
+                                if history_text.strip():
+                                    contextual_question = f"""
+The user is continuing an existing conversation.
+
+PREVIOUS CONVERSATION:
+{history_text}
+
+LATEST USER QUESTION:
+{rag_question}
+
+Interpret short follow-up questions using the previous conversation.
+Use the knowledge-base documents as evidence. If the documents do not
+contain the answer, clearly say so.
+"""
+
+                                rag_answer = ask_knowledge_base(
+                                    client=rag_client,
+                                    question=contextual_question,
+                                    generate_with_retry=generate_with_retry,
+                                )
+
+                            if hasattr(rag_answer, "text"):
+                                rag_answer = rag_answer.text
+
+                            rag_answer = str(rag_answer or "").strip()
+
+                            if not rag_answer:
+                                raise RuntimeError(
+                                    "Gemini returned an empty response."
+                                )
+
+                            st.markdown(rag_answer)
+
+                    # Save NOVA's response in the active conversation.
+                    st.session_state.rag_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": rag_answer,
+                        }
+                    )
+
+                    history.add_message(
+                        conversation_id,
+                        "assistant",
+                        rag_answer,
+                    )
 
                 except Exception as error:
-                    st.error("NOVA could not answer your question.")
+                    st.error(
+                        "NOVA could not answer your question. "
+                        "Please try again."
+                    )
                     st.caption(f"Technical details: {error}")
+
+                    # If generation fails, retain the question in the
+                    # database so the user does not lose their input.
+                    # Remove it from visible state to avoid a duplicate
+                    # when the user retries.
+                    if (
+                        st.session_state.rag_messages
+                        and st.session_state.rag_messages[-1].get("role")
+                        == "user"
+                    ):
+                        st.session_state.rag_messages.pop()
+
+                st.rerun()
 
         st.divider()
 
@@ -353,15 +595,18 @@ if selected_feature == "RAG Knowledge Base":
         st.error("The RAG Knowledge Base could not be loaded.")
         st.caption(f"Technical details: {error}")
 
-    # Prevent the dashboard and its chat input from appearing in RAG mode.
+    # Keep the dashboard and its interview chat out of RAG mode.
     st.stop()
+
 
 # ---------------------------------------------------------
 # 3C. NOVA DOCUMENT STUDIO
 # ---------------------------------------------------------
 
 if selected_feature == "NOVA Document Studio":
+
     st.title("📄 NOVA Document Studio")
+
     st.caption(
         "Create preparation plans, study notes, reports, charts, "
         "PDFs, Word documents, PowerPoint presentations, and Excel workbooks."
@@ -373,6 +618,7 @@ if selected_feature == "NOVA Document Studio":
             generate_with_retry=generate_with_retry,
             model_name=MODEL_NAME,
         )
+
     except Exception as error:
         st.error("NOVA Document Studio could not be loaded.")
         st.caption(f"Technical details: {error}")
@@ -471,6 +717,7 @@ QUESTION_BANK = {
     ],
 }
 
+
 HR_QUESTIONS = [
     "Tell me about yourself.",
     "What are your main strengths?",
@@ -483,6 +730,7 @@ HR_QUESTIONS = [
     "Why should we hire you?",
     "Where would you like to develop professionally over the next few years?",
 ]
+
 
 APTITUDE_QUESTIONS = [
     "A number increases from 80 to 100. What is the percentage increase?",
@@ -555,16 +803,25 @@ def get_answered_question_count():
 
 
 # =========================================================
-# 6. SIDEBAR: SAVED CONVERSATIONS
+# 6. SIDEBAR: SAVED INTERVIEW CONVERSATIONS
 # =========================================================
 
 st.sidebar.title("✨ NOVA AI")
 st.sidebar.caption("Your placement preparation assistant")
 st.sidebar.divider()
-st.sidebar.subheader("💬 Saved Conversations")
+st.sidebar.subheader("💬 Saved Interview Conversations")
+
+# Display only mock-interview conversations here.
+# RAG conversations are managed in the RAG section above.
+
+saved_interviews = [
+    item
+    for item in history.list_conversations()
+    if item.get("chat_type") == "interview"
+]
 
 if st.sidebar.button(
-    "➕ New Chat",
+    "➕ New Interview",
     key="new_saved_chat",
     use_container_width=True,
 ):
@@ -573,12 +830,12 @@ if st.sidebar.button(
     st.session_state.previous_settings = None
     st.rerun()
 
-saved_conversations = history.list_conversations()
-
-if not saved_conversations:
-    st.sidebar.caption("Your saved conversations will appear here.")
+if not saved_interviews:
+    st.sidebar.caption(
+        "Your saved interview conversations will appear here."
+    )
 else:
-    for saved_chat in saved_conversations:
+    for saved_chat in saved_interviews:
         chat_id = saved_chat["id"]
         chat_title = saved_chat["title"]
 
@@ -603,7 +860,15 @@ else:
                 )
 
                 st.session_state.conversation_id = chat_id
-                st.session_state.messages = history.get_messages(chat_id)
+
+                st.session_state.messages = [
+                    {
+                        "role": message["role"],
+                        "content": message["content"],
+                    }
+                    for message in history.get_messages(chat_id)
+                    if message.get("role") in ("user", "assistant")
+                ]
 
                 st.session_state.previous_settings = (
                     st.session_state["interview_type_choice"],
@@ -807,7 +1072,7 @@ render_image_analyzer(
 
 
 # =========================================================
-# 12. RESET ACTIVE CHAT WHEN SETTINGS CHANGE
+# 12. RESET ACTIVE INTERVIEW WHEN SETTINGS CHANGE
 # =========================================================
 
 current_settings = (
@@ -866,6 +1131,7 @@ if st.button("Start Mock Interview", key="start_interview"):
     )
 
     st.session_state.conversation_id = conversation_id
+
     st.session_state.messages = [
         {"role": "assistant", "content": welcome_message}
     ]
@@ -880,7 +1146,7 @@ if st.button("Start Mock Interview", key="start_interview"):
 
 
 # =========================================================
-# 14. DISPLAY CHAT HISTORY
+# 14. DISPLAY MOCK INTERVIEW HISTORY
 # =========================================================
 
 for message in st.session_state.messages:
@@ -913,6 +1179,7 @@ else:
 # =========================================================
 
 if user_input:
+
     if not user_input.strip():
         st.warning("Please enter an answer before submitting.")
         st.stop()
@@ -933,6 +1200,7 @@ if user_input:
     conversation_id = st.session_state.conversation_id
 
     question_number = get_answered_question_count() + 1
+
     current_question = get_question(
         question_number,
         interview_type,
@@ -967,12 +1235,14 @@ if user_input:
             if message["role"] == "user"
             else "NOVA"
         )
+
         conversation_lines.append(
             f"{speaker}: {message['content']}"
         )
 
     if question_number < TOTAL_QUESTIONS:
         next_question_number = question_number + 1
+
         next_question = get_question(
             next_question_number,
             interview_type,
@@ -987,6 +1257,7 @@ After giving feedback, ask the next question exactly once:
 
 Do not answer the next question for the candidate.
 """
+
     else:
         next_step = f"""
 This was Question {TOTAL_QUESTIONS} of {TOTAL_QUESTIONS}.
@@ -1123,7 +1394,7 @@ Respond to the candidate's latest answer now.
 
 
 # =========================================================
-# 17. CLEAR ACTIVE CONVERSATION
+# 17. CLEAR ACTIVE INTERVIEW SCREEN
 # =========================================================
 
 if st.session_state.messages:

@@ -3,172 +3,351 @@ import streamlit as st
 import chat_history as history
 
 
+# =========================================================
+# 1. GENERAL CHAT SYSTEM PROMPT
+# =========================================================
+
 GENERAL_CHAT_PROMPT = """
-You are NOVA, a friendly and helpful AI assistant.
+You are NOVA, a helpful, intelligent, friendly AI assistant.
 
-Your purpose in this mode is to have a natural conversation with the user.
+Your role is to answer questions naturally and help users learn,
+solve problems, write code, and complete practical tasks.
 
-IMPORTANT RULES:
-1. Answer the user's actual question directly.
-2. Do not behave like an interviewer unless the user explicitly asks
-   to practise an interview.
-3. Do not automatically evaluate answers or give interview scores.
+RESPONSE RULES:
+
+1. Answer the user's latest question directly.
+2. Use previous messages to understand follow-up questions.
+3. Never behave like an interviewer unless explicitly requested.
 4. Explain technical concepts in simple, beginner-friendly English.
-5. When asked for code, provide working code and explain it.
-6. When asked for a dry run, trace the code step by step with example
-   input and output.
-7. Help with Python, Java, SQL, Flask, React, DSA, AI, projects,
-   debugging, study plans, and general questions.
-8. If the user asks a follow-up question, use the previous conversation
-   to understand the context.
-9. If information is missing, ask a relevant clarification question.
-10. Never invent code execution results. Clearly explain assumptions.
+5. For coding requests, provide correct, readable, working code.
+6. For dry runs, show the input, variable changes, loop iterations,
+   and final output step by step.
+7. For debugging, identify the likely cause and explain the fix.
+8. For study plans, provide realistic daily tasks and clear priorities.
+9. If the user requests a PDF or another file, create the actual file
+   when the application provides file-generation capabilities.
+   Never claim that a file was created if it was not.
+10. For current events, weather, cyclones, news, and live information,
+    use verified current sources if tools are available. If they are
+    unavailable, clearly explain that you cannot verify current facts.
+11. Never invent facts, execution results, sources, or capabilities.
+12. Use headings, bullet points, examples, and code blocks when useful.
+13. Do not repeat the entire previous answer unnecessarily.
+14. If the question is ambiguous, ask a relevant clarification question.
+15. Do not expose internal API responses, SDK objects, metadata,
+    hidden reasoning, or implementation details to the user.
 
-Respond naturally, like a helpful tutor and conversation partner.
+Write naturally, as a knowledgeable tutor and assistant.
+Prioritize accuracy, clarity, practical examples, and usefulness.
 """
 
 
+# =========================================================
+# 2. HELPER: EXTRACT ONLY THE GENERATED TEXT
+# =========================================================
+
+def extract_answer(response):
+    """
+    Extract readable text from Gemini's response object.
+    Never display the complete SDK response object.
+    """
+
+    if isinstance(response, str):
+        answer = response
+    else:
+        answer = getattr(response, "text", None)
+
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError(
+            "Gemini returned no readable text. Please try again."
+        )
+
+    return answer.strip()
+
+
+# =========================================================
+# 3. HELPER: FORMAT CONVERSATION CONTEXT
+# =========================================================
+
+def build_conversation_context(messages, max_messages=16):
+    """
+    Format recent saved messages for the next Gemini request.
+    Database messages remain the source of truth.
+    """
+
+    recent_messages = messages[-max_messages:]
+    context_lines = []
+
+    for message in recent_messages:
+        role = message.get("role", "")
+        content = message.get("content", "")
+
+        if role not in ("user", "assistant"):
+            continue
+
+        if not content:
+            continue
+
+        speaker = "User" if role == "user" else "NOVA"
+
+        context_lines.append(
+            f"{speaker}:\n{content}"
+        )
+
+    return "\n\n".join(context_lines)
+
+
+# =========================================================
+# 4. GENERAL CHAT PAGE
+# =========================================================
+
 def render_general_chat(client, generate_with_retry, model_name):
-    st.header("💬 General Chat with NOVA")
+
+    st.header("💬 NOVA General Chat")
+
     st.caption(
-        "Ask anything. Learn concepts, write code, practise dry runs, "
-        "debug errors, or have a normal conversation."
+        "Ask questions, learn coding, understand dry runs, "
+        "debug errors, create study plans, and have natural conversations."
     )
 
-    # Find only general-chat conversations in the existing database.
+    # -----------------------------------------------------
+    # SESSION STATE
+    # -----------------------------------------------------
+
+    if "active_general_chat_id" not in st.session_state:
+        st.session_state.active_general_chat_id = None
+
+    # -----------------------------------------------------
+    # LOAD GENERAL CHAT HISTORY FROM SQLITE
+    # -----------------------------------------------------
+
     all_chats = history.list_conversations()
+
     general_chats = [
-        chat for chat in all_chats
-        if chat["chat_type"] == "general"
+        chat
+        for chat in all_chats
+        if chat.get("chat_type") == "general"
     ]
 
-    # Start a separate general conversation.
-    if st.button("➕ New General Chat", key="new_general_chat"):
-        chat_id = history.create_conversation(
+    # -----------------------------------------------------
+    # NEW CHAT
+    # -----------------------------------------------------
+
+    if st.button(
+        "➕ New General Chat",
+        key="new_general_chat",
+        use_container_width=True,
+    ):
+        new_chat_id = history.create_conversation(
             title="New General Chat",
             chat_type="general",
-            metadata={"mode": "general_chat"}
+            metadata={"mode": "general_chat"},
         )
-        st.session_state["active_general_chat_id"] = chat_id
+
+        # Activate the new conversation.
+        # Old conversations remain safely stored in SQLite.
+        st.session_state.active_general_chat_id = new_chat_id
+
         st.rerun()
 
-    # Select an existing general conversation.
+    st.divider()
+
+    # -----------------------------------------------------
+    # SELECT A PREVIOUS CONVERSATION
+    # -----------------------------------------------------
+
     if general_chats:
+
+        st.subheader("🕘 Saved General Conversations")
+
         chat_options = {
-            f'{chat["title"]} (Chat #{chat["id"]})': chat["id"]
+            (
+                f"{chat.get('title') or 'General Chat'} "
+                f"(Chat #{chat['id']})"
+            ): chat["id"]
             for chat in general_chats
         }
+
         labels = list(chat_options.keys())
 
-        current_id = st.session_state.get("active_general_chat_id")
-        matching_label = next(
-            (
-                label for label, chat_id in chat_options.items()
-                if chat_id == current_id
-            ),
-            labels[0]
-        )
-
         selected_label = st.selectbox(
-            "Saved general conversations",
-            labels,
-            index=labels.index(matching_label),
-            key="general_chat_selector"
+            "Choose a saved conversation",
+            options=labels,
+            key="general_chat_history_selector",
         )
 
         selected_id = chat_options[selected_label]
-        st.session_state["active_general_chat_id"] = selected_id
 
-    active_id = st.session_state.get("active_general_chat_id")
+        if st.button(
+            "📂 Open Selected Conversation",
+            key="open_general_chat",
+            use_container_width=True,
+        ):
+            st.session_state.active_general_chat_id = selected_id
+            st.rerun()
 
-    if not active_id:
-        st.info("Click **New General Chat** to start a conversation.")
+    else:
+        st.caption(
+            "Your previous conversations will appear here automatically "
+            "after you start chatting."
+        )
+
+    # -----------------------------------------------------
+    # GET THE ACTIVE CONVERSATION
+    # -----------------------------------------------------
+
+    active_id = st.session_state.active_general_chat_id
+
+    if active_id is None:
+        st.info(
+            "Click **New General Chat** to start a fresh conversation."
+        )
         return
 
     conversation = history.get_conversation(active_id)
 
-    if not conversation or conversation["chat_type"] != "general":
-        st.warning("Please start a new general chat.")
+    if (
+        not conversation
+        or conversation.get("chat_type") != "general"
+    ):
+        st.warning(
+            "This conversation could not be loaded. "
+            "Please start a new General Chat."
+        )
+
+        st.session_state.active_general_chat_id = None
         return
 
-    messages = history.get_messages(active_id)
+    st.caption(
+        f"Current conversation: {conversation.get('title') or 'General Chat'}"
+    )
 
-    # Display previous messages.
+    # -----------------------------------------------------
+    # LOAD ONLY THE ACTIVE CHAT'S MESSAGES
+    # -----------------------------------------------------
+
+    messages = [
+        {
+            "role": message["role"],
+            "content": message["content"],
+        }
+        for message in history.get_messages(active_id)
+        if message.get("role") in ("user", "assistant")
+    ]
+
+    # Display messages from this conversation only.
     for message in messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Accept normal questions, not mock-interview answers.
+    # -----------------------------------------------------
+    # USER INPUT
+    # -----------------------------------------------------
+
     user_prompt = st.chat_input(
         "Ask NOVA anything...",
-        key="general_chat_input"
+        key="general_chat_input",
     )
 
-    if user_prompt:
-        # Save the user's message first.
-        history.add_message(active_id, "user", user_prompt)
+    if not user_prompt:
+        return
 
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
+    user_prompt = user_prompt.strip()
 
-        # Use recent messages as conversation context.
-        recent_messages = messages[-10:]
+    if not user_prompt:
+        st.warning("Please enter a question.")
+        return
 
-        conversation_context = "\n".join(
-            f'{msg["role"].upper()}: {msg["content"]}'
-            for msg in recent_messages
-        )
+    # -----------------------------------------------------
+    # BUILD CONTEXT BEFORE SAVING THE LATEST QUESTION
+    # -----------------------------------------------------
 
-        prompt = f"""
+    previous_context = build_conversation_context(
+        messages,
+        max_messages=16,
+    )
+
+    prompt = f"""
 {GENERAL_CHAT_PROMPT}
 
-PREVIOUS CONVERSATION:
-{conversation_context if conversation_context else "This is the beginning of the conversation."}
+CONVERSATION HISTORY:
+{previous_context if previous_context else
+"No previous messages. This is the first question in this conversation."}
 
 LATEST USER MESSAGE:
 {user_prompt}
 
-Respond to the latest user message directly. Do not turn it into an
-interview question unless the user specifically requests interview practice.
+IMPORTANT:
+- Answer the latest user message.
+- Use conversation history only when relevant.
+- Resolve follow-up references such as "it", "that", and "explain more"
+  using the previous conversation.
+- Do not repeat old answers unless needed.
+- Do not include SDK metadata or raw API response information.
+- Return only the answer intended for the user.
 """
 
-        with st.chat_message("assistant"):
+    # -----------------------------------------------------
+    # SAVE AND DISPLAY THE USER MESSAGE
+    # -----------------------------------------------------
+
+    history.add_message(
+        active_id,
+        "user",
+        user_prompt,
+    )
+
+    with st.chat_message("user"):
+        st.markdown(user_prompt)
+
+    # -----------------------------------------------------
+    # GENERATE AND SAVE THE ASSISTANT RESPONSE
+    # -----------------------------------------------------
+
+    with st.chat_message("assistant"):
+
+        try:
             with st.spinner("NOVA is thinking..."):
-                try:
-                    answer = generate_with_retry(
-                        client=client,
-                        prompt=prompt,
-                        temperature=0.5,
-                        max_tokens=1800
-                    )
 
-                    if not answer or not str(answer).strip():
-                        answer = (
-                            "I couldn't generate a response this time. "
-                            "Please try asking again."
-                        )
+                response = generate_with_retry(
+                    client=client,
+                    prompt=prompt,
+                    temperature=0.5,
+                    max_tokens=2200,
+                )
 
-                    st.markdown(answer)
+                # Critical fix:
+                # Extract response.text instead of str(response).
+                answer = extract_answer(response)
 
-                    # Save the response to the same conversation.
-                    history.add_message(
-                        active_id,
-                        "assistant",
-                        str(answer)
-                    )
+            st.markdown(answer)
 
-                    # Give the first conversation a useful title.
-                    if not messages:
-                        title = " ".join(user_prompt.split())[:45]
-                        history.update_conversation(
-                            active_id,
-                            title=title or "General Chat"
-                        )
+            history.add_message(
+                active_id,
+                "assistant",
+                answer,
+            )
 
-                except Exception as error:
-                    st.error(
-                        "NOVA couldn't respond right now. "
-                        "Please try again."
-                    )
-                    # Keep technical details in the terminal, not the UI.
-                    print(f"General chat error: {error}")
+            # Give the conversation a useful title after its first question.
+            if not messages:
+                title = " ".join(user_prompt.split())[:55]
+
+                if len(user_prompt) > 55:
+                    title += "..."
+
+                history.update_conversation(
+                    active_id,
+                    title=title or "General Chat",
+                )
+
+        except Exception as error:
+            st.error(
+                "NOVA could not generate a response. "
+                "Please try again."
+            )
+
+            # Keep detailed errors in the terminal for debugging.
+            print(f"General chat error: {error}")
+
+    # Refresh messages from SQLite on the next Streamlit run.
+    st.rerun()
