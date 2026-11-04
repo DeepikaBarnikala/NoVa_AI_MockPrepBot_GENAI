@@ -59,13 +59,12 @@ Explain scores briefly and fairly.
 @st.cache_resource
 def get_gemini_client():
     api_key = os.getenv("GEMINI_API_KEY")
-
     if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY is missing. Check your .env file."
-        )
+        try:
+            api_key = st.secrets["GEMINI_API_KEY"]
+        except Exception:
+            api_key = None
 
-    return genai.Client(api_key=api_key)
 
 
 def generate_with_retry(
