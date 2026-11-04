@@ -4,3 +4,8 @@ python-dotenv
 pypdf
 chromadb
 matplotlib
+reportlab
+python-docx
+python-pptx
+openpyxl
+pandas
