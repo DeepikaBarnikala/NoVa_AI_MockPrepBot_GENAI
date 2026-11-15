@@ -53,7 +53,7 @@ The project combines Large Language Models (LLMs), prompt engineering, document 
 - Helps users continue asking questions without replacing earlier messages.
 
 ### 6. Chat History
-- Uses SQLite to store conversation data.
+- Uses local SQLite by default or MySQL when configured.
 - Organizes chat-history functionality in a separate Python module.
 - Can be extended with conversation search, deletion, and history management.
 
@@ -74,6 +74,7 @@ The project combines Large Language Models (LLMs), prompt engineering, document 
 | python-dotenv | Loading local environment variables |
 | PyPDF | Extracting text from PDF resumes |
 | ChromaDB | Vector storage and retrieval for the RAG pipeline |
+| MySQL Connector/Python | Optional hosted MySQL chat-history storage |
 | SQLite | Local conversation-history storage |
 | Git and GitHub | Version control and source-code hosting |
 
@@ -118,7 +119,7 @@ NOVA-AI/
 
 ### Prerequisites
 
-- Python 3.10 or a compatible Python version supported by your dependencies.
+- Python 3.12 (the version used to validate the pinned dependencies).
 - Git installed on your computer.
 - A Google Gemini API key.
 - A GitHub account for source-code hosting.
@@ -161,17 +162,34 @@ pip install -r requirements.txt
 
 ### Step 4: Configure the Gemini API key
 
-Create a `.env` file in the root project directory:
+Copy `.env.example` to `.env` in the project root and set your Gemini API key:
 
 ```env
 GEMINI_API_KEY=your_actual_api_key
 ```
 
-Replace the placeholder with your API key.
+Local chat history uses SQLite by default. To use MySQL locally, fill in
+`MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`, `MYSQL_USER`, and
+`MYSQL_PASSWORD` in `.env`. Leave the MySQL settings blank to keep using
+SQLite. If using MySQL, create the database and a dedicated application user
+before starting NOVA.
 
-The application should load this variable using `python-dotenv` and initialize the Gemini client using the SDK and configuration already implemented in the project.
+For a local MySQL server, create a database and a separate app user in the
+MySQL client (replace the sample password with a unique one):
 
-**Security:** Never upload `.env` or expose your API key in source code, screenshots, README files, or public commits.
+```sql
+CREATE DATABASE nova_ai CHARACTER SET utf8mb4;
+CREATE USER 'nova_app'@'localhost' IDENTIFIED BY 'use-a-unique-password';
+GRANT ALL PRIVILEGES ON nova_ai.* TO 'nova_app'@'localhost';
+```
+
+Then set `MYSQL_HOST=127.0.0.1`, `MYSQL_PORT=3306`,
+`MYSQL_DATABASE=nova_ai`, `MYSQL_USER=nova_app`, and the password in `.env`.
+Use the port and host that your local MySQL installation is configured for.
+
+**Security:** Never upload `.env` or expose API keys, database passwords, or
+connection strings in source code, screenshots, README files, or public
+commits. `.env` is ignored by Git.
 
 ### Step 5: Run the application locally
 
@@ -196,6 +214,7 @@ The project uses the following packages where applicable:
 | python-dotenv | `python-dotenv` | Environment configuration |
 | PyPDF | `pypdf` | PDF text extraction |
 | ChromaDB | `chromadb` | Vector database for RAG |
+| MySQL Connector/Python | `mysql-connector-python` | Optional hosted chat-history database |
 
 Python standard-library modules may also be used:
 
@@ -219,7 +238,7 @@ The definitive dependency list should be generated from the actual imports in th
 5. The Gemini API generates a response.
 6. The application displays the question, explanation, or feedback.
 7. Previous messages are retained for follow-up questions where conversation continuity is enabled.
-8. The chat-history module stores conversation data in SQLite where configured.
+8. The chat-history module stores conversation data in local SQLite by default or MySQL when configured.
 9. Resume and image-analysis features process uploaded content and generate relevant responses.
 
 ## 🔐 Configuration and Security
@@ -231,20 +250,84 @@ The definitive dependency list should be generated from the actual imports in th
 - Validate file types and upload sizes.
 - Handle API errors and missing configuration gracefully.
 
-## ☁️ Deployment
+## ☁️ Deploy to Streamlit Community Cloud
 
-NOVA AI can be deployed using Streamlit Community Cloud.
+### Prepare the database
 
-1. Push the project to a GitHub repository.
-2. Sign in to Streamlit Community Cloud using GitHub.
-3. Create a new app and select the repository, branch, and `app.py` as the entry point.
-4. Configure `GEMINI_API_KEY` in the deployment's Secrets settings.
-5. Deploy the application.
-6. Test the interview, resume, image, and conversation features.
+The MySQL server installed on your computer is available only to your
+computer. `localhost` in Streamlit Community Cloud refers to the cloud app's
+container, not your computer. For cloud-persistent conversations, create a
+hosted MySQL database with a provider that permits connections from the
+Streamlit app. Use its host, port, database name, and a dedicated database
+user; do not use your MySQL root account.
 
-Ensure that `requirements.txt` contains the required dependencies before deploying.
+The first app start creates the `conversations` and `messages` tables. No
+local SQLite history is copied automatically; it stays in the ignored
+`nova_chats.db` file on your computer.
 
-**Deployment consideration:** Local SQLite databases and uploaded files may not persist reliably across cloud restarts, redeployments, or changes to the app's runtime. A production version should use suitable persistent storage if permanent history and uploads are required.
+### Push the project to GitHub
+
+From PowerShell in the project folder, check that the secret file is not
+staged, then commit and push the deployment files:
+
+```powershell
+git status
+git check-ignore .env
+git add app.py chat_history.py requirements.txt .env.example README.md test_chat_history.py
+git commit -m "Prepare NOVA for Streamlit deployment"
+git push origin main
+```
+
+If Git reports that your local branch is behind, first run:
+
+```powershell
+git pull --rebase origin main
+```
+
+Resolve any conflicts, then push again. Never force-push.
+
+### Create the Streamlit app
+
+1. Sign in to Streamlit Community Cloud using the GitHub account that can
+   access this repository.
+2. Select **Create app**, choose
+   `DeepikaBarnikala/NoVa_AI_MockPrepBot_GENAI`, branch `main`, and
+   `app.py` as the main file.
+3. In the app's advanced settings, select Python 3.12 to match the tested
+   environment, then deploy.
+4. Open the app's **Settings → Secrets** and add the following TOML,
+   replacing every placeholder with values from Gemini and your hosted
+   MySQL provider:
+
+   ```toml
+   GEMINI_API_KEY = "your-gemini-api-key"
+
+   [mysql]
+   host = "your-hosted-mysql-host"
+   port = 3306
+   database = "your-database-name"
+   user = "your-dedicated-database-user"
+   password = "your-database-password"
+   ```
+
+5. Save secrets and reboot/redeploy the app. Keep secrets in Streamlit's
+   settings; never put the actual values in GitHub or `.env.example`.
+6. Check the deployment logs if installation or startup fails. The direct
+   dependencies are pinned in `requirements.txt`, and the database adapter
+   supports local SQLite and configured MySQL.
+7. Test a new General Chat conversation, an interview answer, RAG PDF upload
+   and question, resume/image analysis, and PDF/PPTX downloads.
+
+### Storage limitations
+
+- MySQL stores conversations. It does not store RAG document vectors.
+- RAG currently uses a local ChromaDB directory, so the cloud knowledge
+  base starts empty and uploaded documents may be lost after a cloud
+  restart or redeploy. Upload PDFs again when needed; durable RAG requires
+  a separately hosted vector store.
+- Uploaded images and generated files are also written to local app storage.
+  Download generated documents during the session; local files should not
+  be treated as permanent cloud storage.
 
 ## 🧪 Testing Checklist
 
@@ -256,6 +339,7 @@ Ensure that `requirements.txt` contains the required dependencies before deployi
 - [ ] Image uploads and image questions work.
 - [ ] Follow-up questions retain the relevant context.
 - [ ] Chat history is saved and can be retrieved where implemented.
+- [ ] Hosted MySQL credentials work in Streamlit secrets.
 - [ ] RAG retrieves relevant information from the configured knowledge base.
 - [ ] API failures and invalid uploads are handled appropriately.
 - [ ] The deployed application works using cloud configuration.

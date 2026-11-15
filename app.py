@@ -4,7 +4,6 @@ import inspect
 from io import BytesIO
 
 import streamlit as st
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pypdf import PdfReader
@@ -23,8 +22,6 @@ from document_workspace import render_document_workspace
 # =========================================================
 # 1. ENVIRONMENT AND PAGE CONFIGURATION
 # =========================================================
-
-load_dotenv()
 
 st.set_page_config(
     page_title="NOVA | AI Mock Interview Coach",
@@ -57,6 +54,10 @@ Explain scores briefly and fairly.
 # =========================================================
 
 @st.cache_resource
+def _create_gemini_client(api_key):
+    return genai.Client(api_key=api_key)
+
+
 def get_gemini_client():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -64,6 +65,14 @@ def get_gemini_client():
             api_key = st.secrets["GEMINI_API_KEY"]
         except Exception:
             api_key = None
+
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured. Add it to the project "
+            ".env file or Streamlit secrets."
+        )
+
+    return _create_gemini_client(api_key)
 
 
 
